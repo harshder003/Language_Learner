@@ -1,6 +1,11 @@
-{
+﻿{
   "buildCommand": "npm run build",
   "devCommand": "npm run dev",
   "installCommand": "npm install",
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "functions": {
+    "api/index.go": {
+      "runtime": "go1.x"
+    }
+  }
 }
