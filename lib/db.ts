@@ -167,8 +167,8 @@ class InMemoryDatabase {
         const column = orderMatch[1]
         const direction = (orderMatch[2] || 'ASC').toUpperCase()
         filtered.sort((a, b) => {
-          const aVal = a[column]
-          const bVal = b[column]
+          const aVal = (a as any)[column]
+          const bVal = (b as any)[column]
           if (direction === 'DESC') {
             return bVal > aVal ? 1 : bVal < aVal ? -1 : 0
           }
@@ -335,8 +335,8 @@ class InMemoryDatabase {
         const column = orderMatch[1].split('.').pop() || orderMatch[1]
         const direction = (orderMatch[2] || 'DESC').toUpperCase()
         results.sort((a, b) => {
-          const aVal = a[column]
-          const bVal = b[column]
+          const aVal = (a as any)[column]
+          const bVal = (b as any)[column]
           if (direction === 'DESC') {
             return bVal > aVal ? 1 : bVal < aVal ? -1 : 0
           }
