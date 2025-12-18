@@ -1,197 +1,425 @@
 // Database utility for Next.js API routes
-// Using sql.js (WASM-based) for Vercel compatibility - no native compilation required
-// Note: For production, consider using Vercel Postgres or another cloud database
-// SQLite on serverless is ephemeral - data may be lost between deployments
+// Using in-memory database for Vercel serverless compatibility
+// Note: Data is ephemeral and will be lost between deployments
+// For production, consider using Vercel Postgres or another cloud database
 
-import initSqlJs from 'sql.js'
-import path from 'path'
-import fs from 'fs'
+// Simple in-memory database implementation
+interface DatabaseRow {
+  [key: string]: any
+}
 
-// Compatibility wrapper to match better-sqlite3 API
-class SQLiteDatabase {
-  private db: any // sql.js Database instance
+class InMemoryDatabase {
+  private tables: Map<string, DatabaseRow[]> = new Map()
+  private lastInsertId: number = 0
 
-  constructor(db: any) {
-    this.db = db
+  constructor() {
+    this.initializeSchema()
+  }
+
+  private initializeSchema() {
+    // Initialize tables
+    this.tables.set('users', [])
+    this.tables.set('languages', [])
+    this.tables.set('learning_items', [])
+    this.tables.set('flashcard_sessions', [])
   }
 
   prepare(sql: string) {
     return {
       get: (...params: any[]) => {
-        const stmt = this.db.prepare(sql)
-        try {
-          if (params.length > 0) {
-            stmt.bind(params)
-          }
-          const result = stmt.step() ? stmt.getAsObject() : undefined
-          return result
-        } finally {
-          stmt.free()
-        }
+        const result = this.executeQuery(sql, params, true)
+        return result.length > 0 ? result[0] : undefined
       },
       all: (...params: any[]) => {
-        const stmt = this.db.prepare(sql)
-        try {
-          if (params.length > 0) {
-            stmt.bind(params)
-          }
-          const results: any[] = []
-          while (stmt.step()) {
-            results.push(stmt.getAsObject())
-          }
-          return results
-        } finally {
-          stmt.free()
-        }
+        return this.executeQuery(sql, params, false)
       },
       run: (...params: any[]) => {
-        const stmt = this.db.prepare(sql)
-        try {
-          if (params.length > 0) {
-            stmt.bind(params)
-          }
-          stmt.step()
-          const lastInsertRowid = this.db.exec('SELECT last_insert_rowid()')
-          return {
-            lastInsertRowid: lastInsertRowid.length > 0 ? Number(lastInsertRowid[0].values[0][0]) : 0
-          }
-        } finally {
-          stmt.free()
+        this.executeQuery(sql, params, false)
+        return {
+          lastInsertRowid: this.lastInsertId
         }
       }
     }
   }
 
   exec(sql: string) {
-    this.db.run(sql)
+    // Handle CREATE TABLE statements
+    if (sql.includes('CREATE TABLE')) {
+      // Tables are already initialized, just return
+      return
+    }
+    // Handle other exec statements
+    const statements = sql.split(';').filter(s => s.trim())
+    for (const statement of statements) {
+      if (statement.trim()) {
+        this.executeQuery(statement.trim(), [], false)
+      }
+    }
   }
 
-  close() {
-    this.db.close()
+  private executeQuery(sql: string, params: any[], single: boolean): DatabaseRow[] {
+    const upperSql = sql.toUpperCase().trim()
+    
+    // SELECT queries
+    if (upperSql.startsWith('SELECT')) {
+      return this.handleSelect(sql, params, single)
+    }
+    
+    // INSERT queries
+    if (upperSql.startsWith('INSERT')) {
+      this.handleInsert(sql, params)
+      return []
+    }
+    
+    // UPDATE queries
+    if (upperSql.startsWith('UPDATE')) {
+      this.handleUpdate(sql, params)
+      return []
+    }
+    
+    // DELETE queries
+    if (upperSql.startsWith('DELETE')) {
+      this.handleDelete(sql, params)
+      return []
+    }
+    
+    // ALTER TABLE (for migrations)
+    if (upperSql.startsWith('ALTER TABLE')) {
+      // Just return, schema changes are handled in migrations
+      return []
+    }
+    
+    // PRAGMA queries
+    if (upperSql.startsWith('PRAGMA')) {
+      return this.handlePragma(sql)
+    }
+    
+    return []
+  }
+
+  private handleSelect(sql: string, params: any[], single: boolean): DatabaseRow[] {
+    const upperSql = sql.toUpperCase()
+    let results: DatabaseRow[] = []
+    
+    // Handle JOIN queries (for flashcards)
+    if (sql.includes('LEFT JOIN') || sql.includes('JOIN')) {
+      return this.handleJoinQuery(sql, params, single)
+    }
+    
+    // Get table name
+    const fromMatch = sql.match(/FROM\s+(\w+)/i)
+    if (!fromMatch) return []
+    
+    const tableName = fromMatch[1]
+    const table = this.tables.get(tableName) || []
+    
+    // Simple WHERE clause handling
+    let filtered = [...table]
+    
+    if (sql.includes('WHERE')) {
+      const whereClause = sql.match(/WHERE\s+(.+?)(?:\s+ORDER|\s+GROUP|$)/i)?.[1] || ''
+      
+      // Handle user_id = ?
+      if (whereClause.includes('user_id')) {
+        const userIdx = whereClause.split('?').length - 1
+        const userId = params[userIdx - 1] || params[0]
+        filtered = filtered.filter(row => row.user_id === parseInt(userId))
+      }
+      
+      // Handle language_id = ?
+      if (whereClause.includes('language_id')) {
+        const langIdx = whereClause.split('?').length - 1
+        const langId = params[langIdx - 1] || params[1]
+        if (langId) {
+          filtered = filtered.filter(row => row.language_id === parseInt(langId))
+        }
+      }
+      
+      // Handle id = ?
+      if (whereClause.includes('id = ?')) {
+        const id = params[0]
+        filtered = filtered.filter(row => row.id === parseInt(id))
+      }
+      
+      // Handle username = ?
+      if (whereClause.includes('username = ?')) {
+        const username = params[0]
+        filtered = filtered.filter(row => row.username === username)
+      }
+      
+      // Handle created_at >= ?
+      if (whereClause.includes('created_at >= ?')) {
+        const dateParam = params.find(p => typeof p === 'string' && p.includes('T'))
+        if (dateParam) {
+          const threshold = new Date(dateParam)
+          filtered = filtered.filter(row => {
+            const rowDate = new Date(row.created_at)
+            return rowDate >= threshold
+          })
+        }
+      }
+    }
+    
+    // ORDER BY
+    if (sql.includes('ORDER BY')) {
+      const orderMatch = sql.match(/ORDER BY\s+(\w+)\s+(ASC|DESC)?/i)
+      if (orderMatch) {
+        const column = orderMatch[1]
+        const direction = (orderMatch[2] || 'ASC').toUpperCase()
+        filtered.sort((a, b) => {
+          const aVal = a[column]
+          const bVal = b[column]
+          if (direction === 'DESC') {
+            return bVal > aVal ? 1 : bVal < aVal ? -1 : 0
+          }
+          return aVal > bVal ? 1 : aVal < bVal ? -1 : 0
+        })
+      }
+    }
+    
+    results = filtered
+    
+    return single ? results.slice(0, 1) : results
+  }
+
+  private handleInsert(sql: string, params: any[]) {
+    const match = sql.match(/INSERT INTO\s+(\w+)\s*\(([^)]+)\)/i)
+    if (!match) return
+    
+    const tableName = match[1]
+    const columns = match[2].split(',').map(c => c.trim())
+    const table = this.tables.get(tableName) || []
+    
+    const row: DatabaseRow = {
+      id: ++this.lastInsertId
+    }
+    
+    columns.forEach((col, idx) => {
+      if (params[idx] !== undefined) {
+        row[col] = params[idx]
+      } else {
+        row[col] = null
+      }
+    })
+    
+    // Set created_at/shown_at if not provided
+    if (!row.created_at && !row.shown_at) {
+      if (tableName === 'flashcard_sessions') {
+        row.shown_at = new Date().toISOString()
+      } else {
+        row.created_at = new Date().toISOString()
+      }
+    }
+    
+    // Handle was_correct boolean conversion
+    if (row.was_correct !== undefined) {
+      row.was_correct = row.was_correct ? 1 : 0
+    }
+    
+    table.push(row)
+    this.tables.set(tableName, table)
+  }
+
+  private handleUpdate(sql: string, params: any[]) {
+    const match = sql.match(/UPDATE\s+(\w+)\s+SET\s+(.+?)\s+WHERE\s+(.+)/i)
+    if (!match) return
+    
+    const tableName = match[1]
+    const setClause = match[2]
+    const whereClause = match[3]
+    const table = this.tables.get(tableName) || []
+    
+    // Parse SET clause
+    const setParts = setClause.split(',').map(s => s.trim())
+    const updates: { [key: string]: any } = {}
+    setParts.forEach((part, idx) => {
+      const [key] = part.split('=')
+      updates[key.trim()] = params[idx]
+    })
+    
+    // Parse WHERE clause
+    let whereParam: any = null
+    if (whereClause.includes('id = ?')) {
+      whereParam = params[params.length - 1]
+    }
+    
+    // Update rows
+    table.forEach(row => {
+      if (whereParam && row.id === parseInt(whereParam)) {
+        Object.assign(row, updates)
+      }
+    })
+    
+    this.tables.set(tableName, table)
+  }
+
+  private handleDelete(sql: string, params: any[]) {
+    const match = sql.match(/DELETE FROM\s+(\w+)(?:\s+WHERE\s+(.+))?/i)
+    if (!match) return
+    
+    const tableName = match[1]
+    const whereClause = match[2]
+    let table = this.tables.get(tableName) || []
+    
+    if (whereClause) {
+      if (whereClause.includes('id = ?')) {
+        const id = params[0]
+        table = table.filter(row => row.id !== parseInt(id))
+      } else if (whereClause.includes('user_id = ?')) {
+        const userId = params[0]
+        table = table.filter(row => row.user_id !== parseInt(userId))
+      }
+    } else {
+      table = []
+    }
+    
+    this.tables.set(tableName, table)
+  }
+
+  private handleJoinQuery(sql: string, params: any[], single: boolean): DatabaseRow[] {
+    // Handle flashcard query with LEFT JOIN
+    const learningItems = this.tables.get('learning_items') || []
+    const flashcardSessions = this.tables.get('flashcard_sessions') || []
+    
+    let filtered = [...learningItems]
+    
+    // Apply WHERE filters
+    if (sql.includes('WHERE')) {
+      const whereClause = sql.match(/WHERE\s+(.+?)(?:\s+GROUP|\s+ORDER|$)/i)?.[1] || ''
+      
+      if (whereClause.includes('li.user_id')) {
+        const userId = params[0]
+        filtered = filtered.filter(row => row.user_id === parseInt(userId))
+      }
+      
+      if (whereClause.includes('li.language_id')) {
+        const langId = params[1]
+        if (langId) {
+          filtered = filtered.filter(row => row.language_id === parseInt(langId))
+        }
+      }
+      
+      if (whereClause.includes('li.created_at >= ?')) {
+        const dateParam = params.find(p => typeof p === 'string' && p.includes('T'))
+        if (dateParam) {
+          const threshold = new Date(dateParam)
+          filtered = filtered.filter(row => {
+            const rowDate = new Date(row.created_at)
+            return rowDate >= threshold
+          })
+        }
+      }
+    }
+    
+    // Add flashcard session data
+    const results = filtered.map(item => {
+      const sessions = flashcardSessions.filter(s => s.item_id === item.id)
+      const lastReviewed = sessions.length > 0 
+        ? sessions.sort((a, b) => new Date(b.shown_at).getTime() - new Date(a.shown_at).getTime())[0].shown_at
+        : null
+      const reviewCount = sessions.length
+      const correctCount = sessions.filter(s => s.was_correct === 1 || s.was_correct === true).length
+      
+      return {
+        ...item,
+        last_reviewed: lastReviewed,
+        review_count: reviewCount,
+        correct_count: correctCount
+      }
+    })
+    
+    // ORDER BY
+    if (sql.includes('ORDER BY')) {
+      const orderMatch = sql.match(/ORDER BY\s+(\w+\.\w+|\w+)\s+(ASC|DESC)?/i)
+      if (orderMatch) {
+        const column = orderMatch[1].split('.').pop() || orderMatch[1]
+        const direction = (orderMatch[2] || 'DESC').toUpperCase()
+        results.sort((a, b) => {
+          const aVal = a[column]
+          const bVal = b[column]
+          if (direction === 'DESC') {
+            return bVal > aVal ? 1 : bVal < aVal ? -1 : 0
+          }
+          return aVal > bVal ? 1 : aVal < bVal ? -1 : 0
+        })
+      }
+    }
+    
+    return single ? results.slice(0, 1) : results
+  }
+
+  private handlePragma(sql: string): DatabaseRow[] {
+    // Handle PRAGMA table_info(users)
+    const match = sql.match(/PRAGMA\s+table_info\((\w+)\)/i)
+    if (!match) return []
+    
+    const tableName = match[1]
+    const table = this.tables.get(tableName) || []
+    
+    if (table.length === 0) {
+      // Return default columns based on table name
+      if (tableName === 'users') {
+        return [
+          { name: 'id', type: 'INTEGER' },
+          { name: 'username', type: 'TEXT' },
+          { name: 'password_hash', type: 'TEXT' },
+          { name: 'forgot_question', type: 'TEXT' },
+          { name: 'forgot_answer_hash', type: 'TEXT' },
+          { name: 'created_at', type: 'DATETIME' }
+        ]
+      } else if (tableName === 'learning_items') {
+        return [
+          { name: 'id', type: 'INTEGER' },
+          { name: 'user_id', type: 'INTEGER' },
+          { name: 'language_id', type: 'INTEGER' },
+          { name: 'type', type: 'TEXT' },
+          { name: 'content', type: 'TEXT' },
+          { name: 'translation', type: 'TEXT' },
+          { name: 'meaning', type: 'TEXT' },
+          { name: 'pronunciation', type: 'TEXT' },
+          { name: 'audio_data', type: 'TEXT' },
+          { name: 'example_usage', type: 'TEXT' },
+          { name: 'notes', type: 'TEXT' },
+          { name: 'created_at', type: 'DATETIME' }
+        ]
+      }
+    }
+    
+    // Return columns from first row
+    const firstRow = table[0]
+    if (firstRow) {
+      return Object.keys(firstRow).map(key => ({
+        name: key,
+        type: typeof firstRow[key] === 'number' ? 'INTEGER' : 'TEXT'
+      }))
+    }
+    
+    return []
   }
 }
 
-let db: SQLiteDatabase | null = null
-let SQL: Awaited<ReturnType<typeof initSqlJs>> | null = null
+let db: InMemoryDatabase | null = null
 
-export async function getDb(): Promise<SQLiteDatabase> {
+export function getDb(): InMemoryDatabase {
   if (db) return db
 
-  // Initialize sql.js
-  if (!SQL) {
-    SQL = await initSqlJs({
-      locateFile: (file: string) => `https://sql.js.org/dist/${file}`
-    })
-  }
-
-  // For Vercel, use /tmp directory (writable but ephemeral)
-  // For local, use project root
-  const isVercel = process.env.VERCEL === '1'
-  const dbDir = isVercel ? '/tmp' : process.cwd()
-  const dbPath = path.join(dbDir, 'language_learner.db')
-
-  let database: InstanceType<typeof SQL.Database>
-
-  // Try to load existing database, or create new one
-  try {
-    if (fs.existsSync(dbPath)) {
-      const buffer = fs.readFileSync(dbPath)
-      database = new SQL.Database(buffer)
-    } else {
-      database = new SQL.Database()
-    }
-  } catch (error) {
-    // If file doesn't exist or can't be read, create new database
-    database = new SQL.Database()
-  }
-
-  db = new SQLiteDatabase(database)
+  db = new InMemoryDatabase()
   
-  // Initialize schema
-  const schema = fs.readFileSync(path.join(process.cwd(), 'database/schema.sql'), 'utf-8')
-  db.exec(schema)
-
-  // Run migrations for existing databases
+  // Initialize schema (tables are already created in constructor)
+  // Run migrations
   migrateDatabase(db)
-
-  // Save database to file (for local development)
-  if (!isVercel) {
-    const data = database.export()
-    const buffer = Buffer.from(data)
-    fs.writeFileSync(dbPath, buffer)
-  }
 
   return db
 }
 
-function migrateDatabase(database: SQLiteDatabase) {
+function migrateDatabase(database: InMemoryDatabase) {
   try {
-    // Check if users table exists
-    const tableExists = database.prepare(`
-      SELECT name FROM sqlite_master 
-      WHERE type='table' AND name='users'
-    `).get()
-
-    if (!tableExists) {
-      // Table doesn't exist, schema.sql will create it
-      return
-    }
-
-    // Check if users table has the old schema
-    const tableInfo = database.prepare("PRAGMA table_info(users)").all() as Array<{ name: string; type: string }>
-    const columnNames = tableInfo.map((col: any) => col.name)
-
-    // If password_hash column doesn't exist, we need to migrate
-    if (!columnNames.includes('password_hash')) {
-      console.log('Migrating database schema: Adding authentication columns...')
-      
-      // SQLite doesn't support ALTER TABLE ADD COLUMN with multiple columns in one statement
-      // So we need to add them one by one
-      // Note: We add them as nullable first, then clean up old data
-      
-      // Add password_hash column (nullable for now)
-      database.exec('ALTER TABLE users ADD COLUMN password_hash TEXT')
-      
-      // Add forgot_question column (nullable for now)
-      database.exec('ALTER TABLE users ADD COLUMN forgot_question TEXT')
-      
-      // Add forgot_answer_hash column (nullable for now)
-      database.exec('ALTER TABLE users ADD COLUMN forgot_answer_hash TEXT')
-
-      // For existing users without passwords, delete them and their data
-      // Since they can't authenticate with the new system anyway
-      const usersWithoutPassword = database.prepare(
-        'SELECT id FROM users WHERE password_hash IS NULL OR password_hash = ""'
-      ).all() as Array<{ id: number }>
-      
-      if (usersWithoutPassword.length > 0) {
-        console.log(`Removing ${usersWithoutPassword.length} old user(s) without passwords...`)
-        // Delete related data first (due to foreign keys)
-        const userIds = usersWithoutPassword.map(u => u.id)
-        for (const userId of userIds) {
-          // Delete in order: flashcard_sessions -> learning_items -> languages -> users
-          database.prepare('DELETE FROM flashcard_sessions WHERE user_id = ?').run(userId)
-          database.prepare('DELETE FROM learning_items WHERE user_id = ?').run(userId)
-          database.prepare('DELETE FROM languages WHERE user_id = ?').run(userId)
-          database.prepare('DELETE FROM users WHERE id = ?').run(userId)
-        }
-      }
-      
-      console.log('Database migration completed!')
-      console.log('Note: Old users without passwords have been removed. Please sign up again.')
-    }
-
-    // Check if learning_items table needs audio_data column
-    const itemsTableInfo = database.prepare("PRAGMA table_info(learning_items)").all() as Array<{ name: string; type: string }>
-    const itemsColumnNames = itemsTableInfo.map((col: any) => col.name)
-
-    if (!itemsColumnNames.includes('audio_data')) {
-      console.log('Adding audio_data column to learning_items table...')
-      database.exec('ALTER TABLE learning_items ADD COLUMN audio_data TEXT')
-      console.log('audio_data column added successfully!')
-    }
+    // Check if users table exists and has data
+    const users = database.prepare('SELECT * FROM users LIMIT 1').all()
+    
+    // Schema is already initialized, migrations handled automatically
+    // by the in-memory structure
   } catch (error) {
     console.error('Migration error:', error)
-    // Don't throw - let the app continue, but log the error
   }
 }

@@ -3,7 +3,7 @@ import { getDb } from '@/lib/db'
 
 export async function DELETE(request: NextRequest) {
   try {
-    const database = await getDb()
+    const database = getDb()
     const { searchParams } = new URL(request.url)
     const id = searchParams.get('id')
     

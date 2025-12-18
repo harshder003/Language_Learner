@@ -4,7 +4,7 @@ import { comparePassword, generateToken } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
-    const database = await getDb()
+    const database = getDb()
     const body = await request.json()
     const { username, password } = body
 

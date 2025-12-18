@@ -3,7 +3,7 @@ import { getDb } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
   try {
-    const database = await getDb()
+    const database = getDb()
     const { searchParams } = new URL(request.url)
     const userId = searchParams.get('user_id')
     const languageId = searchParams.get('language_id')
@@ -68,7 +68,7 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const database = await getDb()
+    const database = getDb()
     const body = await request.json()
     const { user_id, language_id, type, content, translation, meaning, pronunciation, audio_data, example_usage, notes } = body
     
