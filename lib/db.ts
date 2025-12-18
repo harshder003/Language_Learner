@@ -3,15 +3,15 @@
 // Note: For production, consider using Vercel Postgres or another cloud database
 // SQLite on serverless is ephemeral - data may be lost between deployments
 
-import initSqlJs, { Database } from 'sql.js'
+import initSqlJs from 'sql.js'
 import path from 'path'
 import fs from 'fs'
 
 // Compatibility wrapper to match better-sqlite3 API
 class SQLiteDatabase {
-  private db: Database
+  private db: any // sql.js Database instance
 
-  constructor(db: Database) {
+  constructor(db: any) {
     this.db = db
   }
 
@@ -72,7 +72,7 @@ class SQLiteDatabase {
 }
 
 let db: SQLiteDatabase | null = null
-let SQL: typeof initSqlJs | null = null
+let SQL: Awaited<ReturnType<typeof initSqlJs>> | null = null
 
 export async function getDb(): Promise<SQLiteDatabase> {
   if (db) return db
@@ -90,7 +90,7 @@ export async function getDb(): Promise<SQLiteDatabase> {
   const dbDir = isVercel ? '/tmp' : process.cwd()
   const dbPath = path.join(dbDir, 'language_learner.db')
 
-  let database: Database
+  let database: InstanceType<typeof SQL.Database>
 
   // Try to load existing database, or create new one
   try {
