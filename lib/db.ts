@@ -1,31 +1,111 @@
 // Database utility for Next.js API routes
-// Note: For Vercel production, consider using Vercel Postgres or another cloud database
-// SQLite works for local development but has limitations on serverless platforms
+// Using sql.js (WASM-based) for Vercel compatibility - no native compilation required
+// Note: For production, consider using Vercel Postgres or another cloud database
+// SQLite on serverless is ephemeral - data may be lost between deployments
 
-import Database from 'better-sqlite3'
+import initSqlJs, { Database } from 'sql.js'
 import path from 'path'
 import fs from 'fs'
 
-let db: Database.Database | null = null
+// Compatibility wrapper to match better-sqlite3 API
+class SQLiteDatabase {
+  private db: Database
 
-export function getDb(): Database.Database {
+  constructor(db: Database) {
+    this.db = db
+  }
+
+  prepare(sql: string) {
+    return {
+      get: (...params: any[]) => {
+        const stmt = this.db.prepare(sql)
+        try {
+          if (params.length > 0) {
+            stmt.bind(params)
+          }
+          const result = stmt.step() ? stmt.getAsObject() : undefined
+          return result
+        } finally {
+          stmt.free()
+        }
+      },
+      all: (...params: any[]) => {
+        const stmt = this.db.prepare(sql)
+        try {
+          if (params.length > 0) {
+            stmt.bind(params)
+          }
+          const results: any[] = []
+          while (stmt.step()) {
+            results.push(stmt.getAsObject())
+          }
+          return results
+        } finally {
+          stmt.free()
+        }
+      },
+      run: (...params: any[]) => {
+        const stmt = this.db.prepare(sql)
+        try {
+          if (params.length > 0) {
+            stmt.bind(params)
+          }
+          stmt.step()
+          const lastInsertRowid = this.db.exec('SELECT last_insert_rowid()')
+          return {
+            lastInsertRowid: lastInsertRowid.length > 0 ? Number(lastInsertRowid[0].values[0][0]) : 0
+          }
+        } finally {
+          stmt.free()
+        }
+      }
+    }
+  }
+
+  exec(sql: string) {
+    this.db.run(sql)
+  }
+
+  close() {
+    this.db.close()
+  }
+}
+
+let db: SQLiteDatabase | null = null
+let SQL: typeof initSqlJs | null = null
+
+export async function getDb(): Promise<SQLiteDatabase> {
   if (db) return db
 
-  // For Vercel, use /tmp directory (writable)
+  // Initialize sql.js
+  if (!SQL) {
+    SQL = await initSqlJs({
+      locateFile: (file: string) => `https://sql.js.org/dist/${file}`
+    })
+  }
+
+  // For Vercel, use /tmp directory (writable but ephemeral)
   // For local, use project root
   const isVercel = process.env.VERCEL === '1'
   const dbDir = isVercel ? '/tmp' : process.cwd()
   const dbPath = path.join(dbDir, 'language_learner.db')
 
-  // Ensure directory exists
-  if (!isVercel) {
-    const dir = path.dirname(dbPath)
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true })
+  let database: Database
+
+  // Try to load existing database, or create new one
+  try {
+    if (fs.existsSync(dbPath)) {
+      const buffer = fs.readFileSync(dbPath)
+      database = new SQL.Database(buffer)
+    } else {
+      database = new SQL.Database()
     }
+  } catch (error) {
+    // If file doesn't exist or can't be read, create new database
+    database = new SQL.Database()
   }
 
-  db = new Database(dbPath)
+  db = new SQLiteDatabase(database)
   
   // Initialize schema
   const schema = fs.readFileSync(path.join(process.cwd(), 'database/schema.sql'), 'utf-8')
@@ -34,10 +114,17 @@ export function getDb(): Database.Database {
   // Run migrations for existing databases
   migrateDatabase(db)
 
+  // Save database to file (for local development)
+  if (!isVercel) {
+    const data = database.export()
+    const buffer = Buffer.from(data)
+    fs.writeFileSync(dbPath, buffer)
+  }
+
   return db
 }
 
-function migrateDatabase(database: Database.Database) {
+function migrateDatabase(database: SQLiteDatabase) {
   try {
     // Check if users table exists
     const tableExists = database.prepare(`
@@ -52,7 +139,7 @@ function migrateDatabase(database: Database.Database) {
 
     // Check if users table has the old schema
     const tableInfo = database.prepare("PRAGMA table_info(users)").all() as Array<{ name: string; type: string }>
-    const columnNames = tableInfo.map(col => col.name)
+    const columnNames = tableInfo.map((col: any) => col.name)
 
     // If password_hash column doesn't exist, we need to migrate
     if (!columnNames.includes('password_hash')) {
@@ -81,13 +168,13 @@ function migrateDatabase(database: Database.Database) {
         console.log(`Removing ${usersWithoutPassword.length} old user(s) without passwords...`)
         // Delete related data first (due to foreign keys)
         const userIds = usersWithoutPassword.map(u => u.id)
-        userIds.forEach((userId: number) => {
+        for (const userId of userIds) {
           // Delete in order: flashcard_sessions -> learning_items -> languages -> users
           database.prepare('DELETE FROM flashcard_sessions WHERE user_id = ?').run(userId)
           database.prepare('DELETE FROM learning_items WHERE user_id = ?').run(userId)
           database.prepare('DELETE FROM languages WHERE user_id = ?').run(userId)
           database.prepare('DELETE FROM users WHERE id = ?').run(userId)
-        })
+        }
       }
       
       console.log('Database migration completed!')
@@ -96,7 +183,7 @@ function migrateDatabase(database: Database.Database) {
 
     // Check if learning_items table needs audio_data column
     const itemsTableInfo = database.prepare("PRAGMA table_info(learning_items)").all() as Array<{ name: string; type: string }>
-    const itemsColumnNames = itemsTableInfo.map(col => col.name)
+    const itemsColumnNames = itemsTableInfo.map((col: any) => col.name)
 
     if (!itemsColumnNames.includes('audio_data')) {
       console.log('Adding audio_data column to learning_items table...')
@@ -108,4 +195,3 @@ function migrateDatabase(database: Database.Database) {
     // Don't throw - let the app continue, but log the error
   }
 }
-

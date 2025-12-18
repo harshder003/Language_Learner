@@ -4,7 +4,7 @@ import { hashPassword } from '@/lib/auth'
 
 export async function POST(request: NextRequest) {
   try {
-    const database = getDb()
+    const database = await getDb()
     const body = await request.json()
     const { userId, newPassword } = body
 
@@ -19,16 +19,21 @@ export async function POST(request: NextRequest) {
     const passwordHash = await hashPassword(newPassword)
 
     // Update password
-    const result = database
-      .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-      .run(passwordHash, userId)
-
-    if (result.changes === 0) {
+    // Check if user exists first
+    const userCheck = database
+      .prepare('SELECT id FROM users WHERE id = ?')
+      .get(userId)
+    
+    if (!userCheck) {
       return NextResponse.json(
         { error: 'User not found' },
         { status: 404 }
       )
     }
+
+    database
+      .prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+      .run(passwordHash, userId)
 
     return NextResponse.json({
       success: true,
