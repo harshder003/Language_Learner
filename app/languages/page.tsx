@@ -48,8 +48,9 @@ export default function LanguagesPage() {
       setFormData({ language_code: '', language_name: '' })
       setShowForm(false)
       loadLanguages()
-    } catch (error) {
-      setMessage({ type: 'error', text: 'Failed to add language' })
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.error || error.message || 'Failed to add language'
+      setMessage({ type: 'error', text: errorMessage })
     } finally {
       setLoading(false)
     }

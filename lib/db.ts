@@ -34,9 +34,16 @@ class InMemoryDatabase {
         return this.executeQuery(sql, params, false)
       },
       run: (...params: any[]) => {
-        this.executeQuery(sql, params, false)
-        return {
-          lastInsertRowid: this.lastInsertId
+        const previousId = this.lastInsertId
+        try {
+          this.executeQuery(sql, params, false)
+          return {
+            lastInsertRowid: this.lastInsertId
+          }
+        } catch (error) {
+          // Reset lastInsertId if insert failed
+          this.lastInsertId = previousId
+          throw error
         }
       }
     }
@@ -190,9 +197,7 @@ class InMemoryDatabase {
     const columns = match[2].split(',').map(c => c.trim())
     const table = this.tables.get(tableName) || []
     
-    const row: DatabaseRow = {
-      id: ++this.lastInsertId
-    }
+    const row: DatabaseRow = {}
     
     columns.forEach((col, idx) => {
       if (params[idx] !== undefined) {
@@ -201,6 +206,25 @@ class InMemoryDatabase {
         row[col] = null
       }
     })
+    
+    // Check for unique constraints before inserting
+    if (tableName === 'languages') {
+      // Check UNIQUE(user_id, language_code) constraint
+      const existing = table.find(
+        (r: DatabaseRow) => 
+          r.user_id === row.user_id && 
+          r.language_code === row.language_code
+      )
+      if (existing) {
+        // Throw error to match SQLite behavior for unique constraint violation
+        const error: any = new Error('UNIQUE constraint failed: languages.user_id, languages.language_code')
+        error.code = 'SQLITE_CONSTRAINT_UNIQUE'
+        throw error
+      }
+    }
+    
+    // Only increment ID and assign it if insert will succeed
+    row.id = ++this.lastInsertId
     
     // Set created_at/shown_at if not provided
     if (!row.created_at && !row.shown_at) {

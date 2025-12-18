@@ -19,16 +19,51 @@ func CreateLanguage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate required fields
+	if lang.UserID == 0 || lang.LanguageCode == "" || lang.LanguageName == "" {
+		http.Error(w, "user_id, language_code, and language_name are required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if language already exists for this user
+	var existingID int
+	checkQuery := `SELECT id FROM languages WHERE user_id = ? AND language_code = ?`
+	err := database.DB.QueryRow(checkQuery, lang.UserID, lang.LanguageCode).Scan(&existingID)
+	if err == nil {
+		// Language already exists
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "Language with code \"" + lang.LanguageCode + "\" already exists for this user",
+		})
+		return
+	}
+
 	query := `INSERT INTO languages (user_id, language_code, language_name)
 		VALUES (?, ?, ?)`
 
 	result, err := database.DB.Exec(query, lang.UserID, lang.LanguageCode, lang.LanguageName)
 	if err != nil {
+		// Check if it's a unique constraint violation
+		if err.Error() != "" && (err.Error() == "UNIQUE constraint failed: languages.user_id, languages.language_code" ||
+			err.Error() == "UNIQUE constraint failed: languages.user_id, languages.language_code") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "Language with code \"" + lang.LanguageCode + "\" already exists for this user",
+			})
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	id, _ := result.LastInsertId()
+	id, err := result.LastInsertId()
+	if err != nil || id == 0 {
+		http.Error(w, "Failed to insert language", http.StatusInternalServerError)
+		return
+	}
+
 	lang.ID = int(id)
 
 	w.Header().Set("Content-Type", "application/json")
