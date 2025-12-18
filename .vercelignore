@@ -1,0 +1,10 @@
+# Ignore Go files - we're using Next.js API routes instead
+go-api/
+handlers/
+database/
+models/
+cmd/
+*.go
+go.mod
+go.sum
+
